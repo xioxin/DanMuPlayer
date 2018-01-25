@@ -8,7 +8,8 @@
 
 #import "LazyCatAVPlayerViewController.h"
 #import "StrokeUILabel.h"
-#define SUPPORT_PLAYLIST 0
+#import "MMVideoSources.h"
+#define SUPPORT_PLAYLIST 1
 
 @interface LazyCatAVPlayerViewController() {
     AVAudioSession *_session;
@@ -20,34 +21,64 @@
     NSString *artworkImage;
     UITapGestureRecognizer *menuRecognizer;
     UIPanGestureRecognizer *panRecognizer;
+    UIPanGestureRecognizer *panButtonListRecognizer;
     UITableView *playlistTableView;
     UIVisualEffectView *bgView;
     AVPlayer *player;
     BOOL isPlayListShowing;
+    BOOL isControllerVisible;
     CADisplayLink *displayLink;
     NSTimeInterval currentResumeTime;
     StrokeUILabel *timeLabel;
+    StrokeUILabel *subsLabel;
     id timeObserver;
+    DanMuLayer *danmu;
+    DMPlaylist *list;
+    BOOL firstTime;
+    PlayerState currentState;
+    NSTimeInterval currentTime;
+    BOOL playerInited;
 }
 @end
 
 @implementation LazyCatAVPlayerViewController
 @synthesize delegate;
+@synthesize buttonClickCallback;
+@synthesize buttonFocusIndex;
+@synthesize timeMode;
+
+- (id)init {
+    self = [super init];
+    if (self) {
+        playerInited=NO;
+    }
+    return self;
+}
 
 - (void)updateProgress {
+    [danmu updateFrame];
     if (self.delegate) {
         NSTimeInterval current = CMTimeGetSeconds(player.currentTime);
         [self.delegate timeDidChangedHD:current];
     }
 }
 
-- (void)initVideoPlayListView {
-    CGRect rect = CGRectMake(bgView.frame.origin.x, bgView.frame.origin.y, bgView.frame.size.width-80, bgView.frame.size.height);
+- (void)initButtonListView {
+    CGRect labelRect = CGRectMake(bgView.frame.origin.x, bgView.frame.origin.y, bgView.frame.size.width, 90);
+    UILabel *label = [[UILabel alloc] initWithFrame:labelRect];
+    [label setTextAlignment:NSTextAlignmentCenter];
+    label.text = @"选单(左右滑动显隐)";
+    [bgView.contentView addSubview:label];
+    CGRect rect = CGRectMake(bgView.frame.origin.x, bgView.frame.origin.y+90, bgView.frame.size.width-80, bgView.frame.size.height-90);
     playlistTableView = [[UITableView alloc] initWithFrame:rect style:UITableViewStylePlain];
     playlistTableView.rowHeight = 70;
     playlistTableView.delegate = self;
     playlistTableView.dataSource = self;
     [bgView.contentView addSubview:playlistTableView];
+    bgView.hidden = YES;
+    CGSize size = bgView.frame.size;
+    CGRect frame = CGRectMake(-size.width, 0, size.width, size.height);
+    bgView.frame = frame;
 }
 
 #if SUPPORT_PLAYLIST
@@ -68,22 +99,30 @@
 - (UITableViewCell*)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"buttonViewCell"];
     cell.textLabel.textAlignment = NSTextAlignmentCenter;
-    cell.textLabel.text = [NSString stringWithFormat:@"第%zd集", indexPath.row];
+    cell.textLabel.text = [list.items objectAtIndex: indexPath.row].title;
     cell.textLabel.textColor = UIColor.whiteColor;
     cell.textLabel.highlightedTextColor = UIColor.blackColor;
     return cell;
 }
 
 - (NSInteger)tableView:(nonnull UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return 8;
+    if (list!=nil && list.items !=nil) {
+        return list.items.count;
+    }
+    return 0;
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     NSLog(@"didSelectRowAtIndexPath %zd", indexPath.row);
+    self.buttonFocusIndex = indexPath.row;
+    if (self.buttonClickCallback) {
+        [[self.buttonClickCallback.context objectForKeyedSubscript:@"setTimeout"] callWithArguments: @[buttonClickCallback, @0, [NSNumber numberWithInteger:indexPath.row]]];
+    }
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    firstTime=YES;
     self.view.backgroundColor = UIColor.blackColor;
     _session = [AVAudioSession sharedInstance];
     [_session setCategory:AVAudioSessionCategoryPlayback error:nil];
@@ -96,41 +135,38 @@
     displayLink.paused = YES;
     [displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
 #if SUPPORT_PLAYLIST
-    CGRect rect = CGRectMake(0, 0, 500, UIScreen.mainScreen.bounds.size.height);
-    UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleLight];
+    CGRect rect = CGRectMake(0, 0, 550, UIScreen.mainScreen.bounds.size.height);
+    UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleRegular];
     bgView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
     bgView.frame = rect;
-    isPlayListShowing = YES;
+    isPlayListShowing = NO;
     [self setNeedsFocusUpdate];
+    
+    [self.view addSubview:bgView];
+    [self initButtonListView];
     
     panRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
     [self.view addGestureRecognizer:panRecognizer];
-    [self.view addSubview:bgView];
-    [self initVideoPlayListView];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        NSLog(@"hide Play List");
-        [UIView animateWithDuration:0.2 delay:0.3 options:0 animations:^{
-            CGSize size = bgView.frame.size;
-            CGRect frame = CGRectMake(-size.width, 0, size.width, size.height);
-            bgView.frame = frame;
-        } completion:^(BOOL finished) {
-            isPlayListShowing=NO;
-            [self setNeedsFocusUpdate];
-        }];
-    });
+    
+    panButtonListRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(panButtonList:)];
+    [playlistTableView addGestureRecognizer:panButtonListRecognizer];
 #endif
+
+    playerInited=YES;
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     displayLink.paused = YES;
-    [displayLink removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
 }
 
 - (void)playerItemDidToPlayToEnd:(NSNotification *)notification
 {
     if (self.delegate) {
-        //[self.delegate playStateDidChanged:PS_FINISH];
-        [self stop];
+        if (isPlayListShowing) {
+            [self.delegate playStateDidChanged:PS_FINISH];
+        } else {
+            [self stop];
+        }
     }
 }
 
@@ -141,9 +177,12 @@
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
+    NSLog(@"observeValueForKeyPath %@", keyPath);
     if ([keyPath isEqualToString:@"status"]) {
         AVPlayerItem *playerItem = (AVPlayerItem*)object;
         if (playerItem.status == AVPlayerItemStatusReadyToPlay) {
+            if (!firstTime) return;
+            firstTime=NO;
             NSLog(@"Item is ready, and will play");
             //resume
             if (currentResumeTime < 0.01) {
@@ -188,8 +227,20 @@
         }
     } else if ([keyPath isEqualToString:@"rate"]) {
         NSLog(@"current rate %.2f", player.rate);
-    } else if ([keyPath isEqualToString:@"showsPlaybackControls"]) {
-        NSLog(@"showsPlaybackControls %@", (self.avPlayerViewController.showsPlaybackControls)?@"YES":@"NO");
+    } else if ([keyPath isEqualToString:@"timeControlStatus"]) {
+        if (player.timeControlStatus == AVPlayerTimeControlStatusPaused) {
+            NSLog(@"timeControlStatus paused");
+            currentState = PS_PAUSED;
+            displayLink.paused = YES;
+        } else if (player.timeControlStatus == AVPlayerTimeControlStatusPlaying) {
+            NSLog(@"timeControlStatus playing");
+            currentState = PS_PLAYING;
+            displayLink.paused = NO;
+        } else if (player.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate) {
+            NSLog(@"timeControlStatus WaitingToPlayAtSpecifiedRate");
+            currentState = PS_LOADING;
+            displayLink.paused = YES;
+        }
     }
 }
 
@@ -228,7 +279,7 @@
     return item;
 }
 
-- (void)pan:(UIPanGestureRecognizer*)sender {
+- (void)panButtonList:(UIPanGestureRecognizer*)sender {
 #if SUPPORT_PLAYLIST
     //CGPoint location = [sender translationInView:self.view];
     CGPoint v = [sender velocityInView:self.view];
@@ -240,16 +291,8 @@
             stateStr = @"Changed";
         } else if (sender.state == UIGestureRecognizerStateEnded) {
             stateStr = @"Ended";
-            if (fabs(v.y)<2000 && fabs(v.x) > 2000) {
-                NSLog(@"show play list");
-                [UIView animateWithDuration:0.2 delay:0.3 options:0 animations:^{
-                    CGSize size = bgView.frame.size;
-                    CGRect frame = CGRectMake(0, 0, size.width, size.height);
-                    bgView.frame = frame;
-                } completion:^(BOOL finished) {
-                    isPlayListShowing=YES;
-                    [self setNeedsFocusUpdate];
-                }];
+            if (isPlayListShowing && currentState != PS_PAUSED && fabs(v.y)<2000 && v.x < -600) {
+                [self hideButtonList];
             }
         } else if (sender.state == UIGestureRecognizerStateCancelled) {
             stateStr = @"Cancelled";
@@ -267,49 +310,82 @@
 #endif
 }
 
+- (void)pan:(UIPanGestureRecognizer*)sender {
+#if SUPPORT_PLAYLIST
+    //CGPoint location = [sender translationInView:self.view];
+    CGPoint v = [sender velocityInView:self.view];
+    {//show logs here
+        NSString *stateStr = @"";
+        if (sender.state == UIGestureRecognizerStateBegan) {
+            stateStr = @"Began";
+        } else if (sender.state == UIGestureRecognizerStateChanged) {
+            stateStr = @"Changed";
+        } else if (sender.state == UIGestureRecognizerStateEnded) {
+            stateStr = @"Ended";
+            if (currentState != PS_PAUSED && fabs(v.y)<2000 && v.x > 600) {
+                [self showButtonList];
+            }
+        } else if (sender.state == UIGestureRecognizerStateCancelled) {
+            stateStr = @"Cancelled";
+        } else if (sender.state == UIGestureRecognizerStateFailed) {
+            stateStr = @"Failed";
+        } else if (sender.state == UIGestureRecognizerStatePossible) {
+            stateStr = @"Possible";
+        } else if (sender.state == UIGestureRecognizerStateRecognized) {
+            stateStr = @"Recognized";
+        } else {
+            stateStr = @"Unknown";
+        }
+        //NSLog(@"taped pan event state %@ point %f %f velocity %f %f", stateStr, location.x, location.y, v.x, v.y);
+    }
+#endif
+}
+
+- (void)showButtonList {
+    if (list==nil || list.items.count==0) return;
+    NSLog(@"show play list");
+    bgView.hidden = NO;
+    NSLog(@"set hidden no and do animation");
+    [UIView animateWithDuration:0.2 delay:0.3 options:0 animations:^{
+        CGSize size = bgView.frame.size;
+        CGRect frame = CGRectMake(0, 0, size.width, size.height);
+        bgView.frame = frame;
+    } completion:^(BOOL finished) {
+        isPlayListShowing=YES;
+        [self setNeedsFocusUpdate];
+    }];
+}
+
+-(void)hideButtonList {
+    NSLog(@"hide Play List");
+    [UIView animateWithDuration:0.2 delay:0.3 options:0 animations:^{
+        CGSize size = bgView.frame.size;
+        CGRect frame = CGRectMake(-size.width, 0, size.width, size.height);
+        bgView.frame = frame;
+    } completion:^(BOOL finished) {
+        isPlayListShowing=NO;
+        [self setNeedsFocusUpdate];
+    }];
+}
+
 - (void)tapMenu:(UITapGestureRecognizer*)sender {
     NSLog(@"taped Menu Key");
     if (isPlayListShowing) {
-        NSLog(@"hide Play List");
-        [UIView animateWithDuration:0.2 delay:0.3 options:0 animations:^{
-            CGSize size = bgView.frame.size;
-            CGRect frame = CGRectMake(-size.width, 0, size.width, size.height);
-            bgView.frame = frame;
-        } completion:^(BOOL finished) {
-            isPlayListShowing=NO;
-            [self setNeedsFocusUpdate];
-        }];
+        NSLog(@"hide Button List");
+        [self hideButtonList];
     } else {
-        NSLog(@"try exit");
-        [player pause];
-        [self.delegate playStateDidChanged:PS_FINISH];
-        [self.navigationController popViewControllerAnimated:YES];
+        if (currentState != PS_PAUSED) {
+            NSLog(@"try exit");
+            [self stop];
+            /*
+            [player pause];
+            [self.delegate playStateDidChanged:PS_FINISH];
+            [self.navigationController popViewControllerAnimated:YES];
+             */
+        } else {
+            [player play];
+        }
     }
-}
-
--(instancetype)initWithItem:(JSValue*)item controller:(UINavigationController*)controller_ {
-    isPlayListShowing = NO;
-    self = [super init];
-    self.controller = controller_;
-    if ([item hasProperty:@"url"]) {
-        url = [item objectForKeyedSubscript:@"url"].toString;
-    }
-    if ([item hasProperty:@"headers"]) {
-        headers = [item objectForKeyedSubscript:@"headers"].toDictionary;
-    }
-    if ([item hasProperty:@"title"]) {
-        title = [item objectForKeyedSubscript:@"title"].toString;
-    }
-    if ([item hasProperty:@"subTitle"]) {
-        subTitle = [item objectForKeyedSubscript:@"subTitle"].toString;
-    }
-    if ([item hasProperty:@"description"]) {
-        description = [item objectForKeyedSubscript:@"description"].toString;
-    }
-    if ([item hasProperty:@"artworkImage"]) {
-        artworkImage = [item objectForKeyedSubscript:@"artworkImage"].toString;
-    }
-    return self;
 }
 
 -(void)play {
@@ -321,15 +397,48 @@
 }
 -(void)stop {
     //[player pause];
-    [player.currentItem removeObserver:self forKeyPath:@"status" context:nil];
-    [player.currentItem removeObserver:self forKeyPath:@"rate" context:nil];
-    [self.avPlayerViewController removeObserver:self forKeyPath:@"showsPlaybackControls" context:nil];
-    [player.currentItem cancelPendingSeeks];
-    [player.currentItem.asset cancelLoading];
-    [player replaceCurrentItemWithPlayerItem:nil];
-    [player removeTimeObserver:timeObserver];
-    [self.delegate playStateDidChanged:PS_FINISH];
-    [self.navigationController popViewControllerAnimated:YES];
+    if (self.avPlayerViewController==nil) return;
+    if (!playerInited) {
+        NSLog(@"player not inited, no need do stop");
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (danmu) {
+            [danmu removeFromSuperview];
+        }
+        if (player.currentItem) {
+            [player.currentItem cancelPendingSeeks];
+            [player.currentItem.asset cancelLoading];
+            @try{
+                [player.currentItem removeObserver:self forKeyPath:@"status" context:nil];
+            } @catch(id anException){}
+        }
+        [player replaceCurrentItemWithPlayerItem:nil];
+        @try{
+            [player removeObserver:self forKeyPath:@"rate" context:nil];
+        } @catch(id anException){}
+        @try{
+            [player removeTimeObserver:timeObserver];
+        } @catch(id anException){}
+        if (self.delegate) {
+            [self.delegate playStateDidChanged:PS_FINISH];
+            self.delegate=nil;
+        }
+        [self dismissViewControllerAnimated:NO completion:^{
+            NSLog(@"stop dissmiss viewcontroller");
+        }];
+//        if (self.navigationController.topViewController == self) {
+//            [self.navigationController popViewControllerAnimated:YES];
+//        }
+        /*
+        if (displayLink) {
+            @try {
+                [displayLink removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSDefaultRunLoopMode];
+            } @catch(id anException){}
+        }
+         */
+        playerInited=NO;
+    });
 }
 
 -(void)seekToTime:(CGFloat)time {
@@ -353,37 +462,56 @@
     if ([options.allKeys containsObject:@"headers"]) {
         headers = [options objectForKey:@"headers"];
     }
-    AVURLAsset *asset = nil;
-    if (headers) {
-        asset = [AVURLAsset URLAssetWithURL:[NSURL URLWithString:url]
-                                    options:@{@"AVURLAssetHTTPHeaderFieldsKey": headers}];
+    MMVideoSources *videosSource = [MMVideoSources sourceFromURL:url];
+    [videosSource dump];
+    if (videosSource.segments.count==1) {
+        AVURLAsset *asset = nil;
+        if (headers) {
+            asset = [AVURLAsset URLAssetWithURL:[NSURL URLWithString:url]
+                                        options:@{@"AVURLAssetHTTPHeaderFieldsKey": headers}];
+        } else {
+            asset = [AVURLAsset assetWithURL:[NSURL URLWithString:url]];
+        }
+        AVPlayerItem *item = [AVPlayerItem playerItemWithAsset: asset];
+        item.externalMetadata = [self externalMetaData];
+        [item addObserver:self
+               forKeyPath:@"status"
+                  options:NSKeyValueObservingOptionNew
+                  context:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(playerItemFailedToPlayToEndTime:)
+                                                     name:AVPlayerItemFailedToPlayToEndTimeNotification
+                                                   object:item];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(playerItemDidToPlayToEnd:)
+                                                     name:AVPlayerItemDidPlayToEndTimeNotification
+                                                   object:item];
+        //[player replaceCurrentItemWithPlayerItem:item];
+        player = [[AVPlayer alloc] initWithPlayerItem:item];
     } else {
-        asset = [AVURLAsset assetWithURL:[NSURL URLWithString:url]];
+        NSMutableArray *items = [NSMutableArray array];
+        for (MMVideoSegment *seg in videosSource.segments) {
+            AVURLAsset *asset = nil;
+            if (headers) {
+                asset = [AVURLAsset URLAssetWithURL:[NSURL URLWithString:seg.url]
+                                            options:@{@"AVURLAssetHTTPHeaderFieldsKey": headers}];
+            } else {
+                asset = [AVURLAsset assetWithURL:[NSURL URLWithString:seg.url]];
+            }
+            AVPlayerItem *item = [AVPlayerItem playerItemWithAsset: asset];
+            item.externalMetadata = [self externalMetaData];
+            [items addObject:item];
+        }
+        player = [AVQueuePlayer queuePlayerWithItems:[items copy]];
     }
-    AVPlayerItem *item = [AVPlayerItem playerItemWithAsset: asset];
-    item.externalMetadata = [self externalMetaData];
-    [item addObserver:self
-           forKeyPath:@"status"
-              options:NSKeyValueObservingOptionNew
-              context:nil];
     [player addObserver:self
              forKeyPath:@"rate"
                 options:NSKeyValueObservingOptionNew|NSKeyValueObservingOptionOld
                 context:nil];
-    [self.avPlayerViewController addObserver:self
-                                  forKeyPath:@"showsPlaybackControls"
-                                     options:NSKeyValueObservingOptionNew|NSKeyValueObservingOptionOld
-                                     context:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(playerItemFailedToPlayToEndTime:)
-                                                 name:AVPlayerItemFailedToPlayToEndTimeNotification
-                                               object:item];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(playerItemDidToPlayToEnd:)
-                                                 name:AVPlayerItemDidPlayToEndTimeNotification
-                                               object:item];
-    //[player replaceCurrentItemWithPlayerItem:item];
-    player = [[AVPlayer alloc] initWithPlayerItem:item];
+    [player addObserver:self
+             forKeyPath:@"timeControlStatus"
+                options:NSKeyValueObservingOptionNew|NSKeyValueObservingOptionOld
+                context:nil];
 
     __weak typeof(self) weakSelf = self;
     timeObserver = [player addPeriodicTimeObserverForInterval:CMTimeMake(1, 1) queue:dispatch_get_main_queue() usingBlock:^(CMTime time) {
@@ -391,7 +519,11 @@
         NSTimeInterval current = CMTimeGetSeconds(time);
         NSTimeInterval duration = CMTimeGetSeconds(weakSelf.avPlayerViewController.player.currentItem.duration);
         if (current > duration) current=duration;
-        NSLog(@"time %.2f/%.2f", current, duration);
+        if (currentTime<duration-10.0 && current>= duration-10.0 && !isPlayListShowing) {
+            [weakSelf showButtonList];
+        }
+        currentTime = current;
+        //NSLog(@"time %.2f/%.2f", current, duration);
         if (weakSelf.delegate) {
             [weakSelf.delegate timeDidChanged:current duration:duration];
         }
@@ -407,14 +539,18 @@
     } else {
         [self.view addSubview:self.avPlayerViewController.view];
     }
+    danmu = [[DanMuLayer alloc] initWithFrame:self.view.bounds];
+    [self.view addSubview:danmu];
+    
     timeLabel = [[StrokeUILabel alloc] initWithFrame:CGRectMake(self.view.frame.size.width-280, 60, 200, 60)];
     timeLabel.text = @"";
     timeLabel.textAlignment = NSTextAlignmentRight;
     timeLabel.font = [UIFont fontWithName:@"Menlo" size:50];
     timeLabel.textColor = [UIColor whiteColor];
-    [self.view addSubview:timeLabel];
+    //[self.view addSubview:timeLabel];
     self.avPlayerViewController.view.frame = self.view.frame;
-    
+    [self.avPlayerViewController.contentOverlayView addSubview:timeLabel];
+
 #if SUPPORT_PLAYLIST
     [self setNeedsFocusUpdate];
 #endif
@@ -425,9 +561,26 @@
       withColor:(UIColor*)color
 withStrokeColor:(UIColor*)bgcolor
    withFontSize:(CGFloat)fontSize {
+    [danmu addDanMu:content
+          withStyle:style
+          withColor:color
+    withStrokeColor:bgcolor
+       withFontSize:fontSize];
 }
 
 -(void)setSubTitle:(NSString*)subTitle {
+    if (subsLabel==nil) {
+        CGSize size = self.view.frame.size;
+        subsLabel = [[StrokeUILabel alloc] init];
+        subsLabel.textColor = [UIColor whiteColor];
+        subsLabel.strokeColor = [UIColor blackColor];
+        subsLabel.frame = CGRectMake(0, size.height-130, size.width, 80);
+        subsLabel.font = [UIFont fontWithName:@"Menlo" size:65];
+        subsLabel.textAlignment = NSTextAlignmentCenter;
+        subsLabel.text = @"";
+        [self.view addSubview:subsLabel];
+    }
+    subsLabel.text = subTitle;
 }
 
 - (NSString*)timeToStr:(int)time {
@@ -443,7 +596,24 @@ withStrokeColor:(UIColor*)bgcolor
     //NSInteger seconds = [components second];
     NSInteger hour = [components hour];
     NSInteger minute = [components minute];
-    timeLabel.text = [NSString stringWithFormat:@"%02ld:%02ld", hour, minute];
+    //NSLog(@"timeMode %zd", self.timeMode);
+    if (self.timeMode==TIMEMODE_NONE && !isControllerVisible) {
+        timeLabel.text = @"";
+    } else if (self.timeMode==TIMEMODE_QUARTER) {
+        if (minute%15==0) {
+            timeLabel.text = [NSString stringWithFormat:@"%02ld:%02ld", hour, minute];
+        } else {
+            timeLabel.text = @"";
+        }
+    } else if (self.timeMode==TIMEMODE_HALF) {
+        if (minute%30==0) {
+            timeLabel.text = [NSString stringWithFormat:@"%02ld:%02ld", hour, minute];
+        } else {
+            timeLabel.text = @"";
+        }
+    } else {//ALWAYS
+        timeLabel.text = [NSString stringWithFormat:@"%02ld:%02ld", hour, minute];
+    }
     //NSLog(@"update Time: %@", timeLabel.text);
 }
 
@@ -473,5 +643,32 @@ withStrokeColor:(UIColor*)bgcolor
         theVideoRect.origin.y = 0;
     }
     return theVideoRect;
+}
+-(void)setupButtonList:(DMPlaylist*)playlist {
+    list = playlist;
+}
+- (nullable NSIndexPath *)indexPathForPreferredFocusedViewInTableView:(UITableView *)tableView {
+    NSLog(@"query indexPathForPreferredFocusedViewInTableView %zd", self.buttonFocusIndex);
+    NSIndexPath *path = [NSIndexPath indexPathForRow:self.buttonFocusIndex inSection:0];
+    return path;
+}
+- (void)playerViewController:(AVPlayerViewController *)playerViewController willTransitionToVisibilityOfTransportBar:(BOOL)visible withAnimationCoordinator:(id<AVPlayerViewControllerAnimationCoordinator>)coordinator {
+    NSLog(@"willTransitionToVisibilityOfTransportBar %@", visible?@"true":@"false");
+    isControllerVisible = visible;
+    NSDate *date = [NSDate date];
+    NSCalendar *calendar = [NSCalendar currentCalendar];
+    NSDateComponents *components = [calendar components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:date];
+    //NSInteger seconds = [components second];
+    NSInteger hour = [components hour];
+    NSInteger minute = [components minute];
+    NSLog(@"timeMode %zd", self.timeMode);
+    //NSLog(@"update Time: %@", timeLabel.text);
+    NSLog(@"do willTransitionToVisibilityOfTransportBar %@", visible?@"true":@"false");
+    if (visible) {
+        timeLabel.text = [NSString stringWithFormat:@"%02ld:%02ld", hour, minute];
+    }
+    if (timeMode!=TIMEMODE_ALWAYS && !visible) {
+        timeLabel.text = @"";
+    }
 }
 @end

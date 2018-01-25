@@ -8,6 +8,8 @@
 
 #import <Foundation/Foundation.h>
 #import "DanMuLayer.h"
+#import "DMPlaylist.h"
+@import JavaScriptCore;
 
 typedef enum _PlayerState {
     PS_INIT = 0,
@@ -17,6 +19,13 @@ typedef enum _PlayerState {
     PS_LOADING,
     PS_ERROR
 } PlayerState;
+
+typedef enum _TimeMode {
+    TIMEMODE_ALWAYS,
+    TIMEMODE_QUARTER,
+    TIMEMODE_HALF,
+    TIMEMODE_NONE
+} TimeMode;
 
 @protocol PlayerStateDelegate <NSObject>
 -(void)playStateDidChanged:(PlayerState)state;
@@ -43,6 +52,9 @@ typedef enum _PlayerState {
 withStrokeColor:(UIColor*)bgcolor
    withFontSize:(CGFloat)fontSize;
 -(void)setSubTitle:(NSString*)subTitle;
+-(void)setupButtonList:(DMPlaylist*)playlist;
 @property (nonatomic, readwrite, weak) id<PlayerStateDelegate> delegate;
+@property (nonatomic, strong, readwrite) JSValue *buttonClickCallback;
+@property (nonatomic, assign, readwrite) NSInteger buttonFocusIndex;
+@property (nonatomic, assign, readwrite) NSInteger timeMode;
 @end
-
